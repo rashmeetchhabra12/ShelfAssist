@@ -74,6 +74,7 @@ fun BookDetailScreenRoot(
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BookDetailScreen(
     state: BookDetailState,
