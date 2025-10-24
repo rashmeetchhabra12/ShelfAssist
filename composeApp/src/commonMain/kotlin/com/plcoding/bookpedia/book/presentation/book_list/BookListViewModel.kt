@@ -4,7 +4,7 @@ package com.plcoding.bookpedia.book.presentation.book_list
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
+import com.plcoding.bookpedia.book.data.repository.RecommendationRepository
 import com.plcoding.bookpedia.book.domain.Book
 import com.plcoding.bookpedia.book.domain.BookRepository
 import com.plcoding.bookpedia.core.domain.onError
@@ -14,7 +14,6 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
@@ -26,12 +25,15 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 class BookListViewModel(
-    private val bookRepository: BookRepository
+    private val bookRepository: BookRepository,
+    private val recommendationRepository: RecommendationRepository
 ) : ViewModel() {
 
     private var cachedBooks = emptyList<Book>()
     private var searchJob: Job? = null
     private var observeFavoriteJob: Job? = null
+    private var recommendationsJob: Job? = null
+    private var lastFavoriteCount = 0 // Track favorite count changes
 
     private val _state = MutableStateFlow(BookListState())
     val state = _state
@@ -50,19 +52,26 @@ class BookListViewModel(
     fun onAction(action: BookListAction) {
         when (action) {
             is BookListAction.OnBookClick -> {
-
+                // Handle book click if needed
             }
-
             is BookListAction.OnSearchQueryChange -> {
                 _state.update {
                     it.copy(searchQuery = action.query)
                 }
             }
-
             is BookListAction.OnTabSelected -> {
                 _state.update {
                     it.copy(selectedTabIndex = action.index)
                 }
+                // Load recommendations when user switches to recommendations tab
+                if (action.index == 2) {
+                    if (_state.value.recommendedBooks.isEmpty()) {
+                        loadRecommendations()
+                    }
+                }
+            }
+            is BookListAction.OnLoadRecommendations -> {
+                loadRecommendations()
             }
         }
     }
@@ -72,13 +81,33 @@ class BookListViewModel(
         observeFavoriteJob = bookRepository
             .getFavoriteBooks()
             .onEach { favoriteBooks ->
-                _state.update { it.copy(
-                    favoriteBooks = favoriteBooks
-                ) }
+                val currentCount = favoriteBooks.size
+                val previousCount = lastFavoriteCount
+
+                _state.update {
+                    it.copy(favoriteBooks = favoriteBooks)
+                }
+
+                // If favorites changed and we have loaded recommendations before
+                // AND we're on the recommendations tab, refresh them
+                if (previousCount != currentCount && _state.value.recommendedBooks.isNotEmpty()) {
+                    // Clear current recommendations
+                    _state.update {
+                        it.copy(recommendedBooks = emptyList())
+                    }
+
+                    // Reload if on recommendations tab
+                    if (_state.value.selectedTabIndex == 2 && currentCount > 0) {
+                        loadRecommendations()
+                    }
+                }
+
+                lastFavoriteCount = currentCount
             }
             .launchIn(viewModelScope)
     }
 
+    @OptIn(FlowPreview::class)
     private fun observeSearchQuery() {
         state
             .map { it.searchQuery }
@@ -94,7 +123,6 @@ class BookListViewModel(
                             )
                         }
                     }
-
                     query.length >= 2 -> {
                         searchJob?.cancel()
                         searchJob = searchBooks(query)
@@ -106,10 +134,9 @@ class BookListViewModel(
 
     private fun searchBooks(query: String) = viewModelScope.launch {
         _state.update {
-            it.copy(
-                isLoading = true
-            )
+            it.copy(isLoading = true)
         }
+
         bookRepository
             .searchBooks(query)
             .onSuccess { searchResults ->
@@ -132,4 +159,55 @@ class BookListViewModel(
             }
     }
 
+    private fun loadRecommendations() {
+        // Check if there are favorites first
+        if (_state.value.favoriteBooks.isEmpty()) {
+            _state.update {
+                it.copy(
+                    isLoadingRecommendations = false,
+                    recommendedBooks = emptyList(),
+                    recommendationError = null
+                )
+            }
+            return
+        }
+
+        recommendationsJob?.cancel()
+        recommendationsJob = viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    isLoadingRecommendations = true,
+                    recommendationError = null
+                )
+            }
+
+            recommendationRepository
+                .getRecommendations()
+                .onSuccess { recommendations ->
+                    _state.update {
+                        it.copy(
+                            isLoadingRecommendations = false,
+                            recommendedBooks = recommendations,
+                            recommendationError = null
+                        )
+                    }
+                }
+                .onError { error ->
+                    _state.update {
+                        it.copy(
+                            isLoadingRecommendations = false,
+                            recommendedBooks = emptyList(),
+                            recommendationError = error.toUiText()
+                        )
+                    }
+                }
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        searchJob?.cancel()
+        observeFavoriteJob?.cancel()
+        recommendationsJob?.cancel()
+    }
 }
